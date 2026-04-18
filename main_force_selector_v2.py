@@ -682,25 +682,35 @@ class MainForceStockSelectorV2:
             # 获取字段名
             sm = StockManager.instance()
 
-            # 关键字段索引（需要从字段列表中查找）
-            # 常见字段：净利润(176-192), 营收(230-235), ROE等
-            key_fields = {
-                '净利润': None,
-                '营业收入': None,
-                '净资产收益率': None,
-                '每股收益': None,
-                '每股净资产': None,
-                '资产负债率': None,
-                '经营活动现金流': None,
+            # 关键字段到字段名前缀的映射（用于精确匹配）
+            # 字段名以这些前缀开头表示是主要的该类指标
+            field_prefixes = {
+                '净利润': '利润表_净利润',
+                '营业收入': '利润表_营业收入',
+                '净资产收益率': '盈利能力_净资产收益率',
+                '每股收益': '每股净资产',  # 每股收益通常和每股净资产在一起
+                '每股净资产': '每股净资产',
+                '资产负债率': '资产负债率',
+                '经营活动现金流': '现金流量表_经营活动产生的现金流量净额',
             }
 
-            # 从all_fields获取字段名和索引的映射
+            # 获取字段索引
             all_fields = sm.get_history_finance_all_fields()
-            for idx, field_tuple in enumerate(all_fields):
-                field_name = field_tuple[1]
-                for key in key_fields:
-                    if key in field_name and key_fields[key] is None:
-                        key_fields[key] = idx
+            field_name_to_idx = {item[1]: item[0] for item in all_fields}
+
+            key_fields = {}
+            for key, prefix in field_prefixes.items():
+                # 优先精确匹配字段名
+                if prefix in field_name_to_idx:
+                    key_fields[key] = field_name_to_idx[prefix]
+                else:
+                    # 回退：查找以prefix开头的字段
+                    for item in all_fields:
+                        if item[1].startswith(prefix):
+                            key_fields[key] = item[0]
+                            break
+                    else:
+                        key_fields[key] = None
 
             # 取最近N个季度的数据
             recent_finance = finance_data[-periods:] if len(finance_data) >= periods else finance_data
