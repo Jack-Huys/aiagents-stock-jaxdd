@@ -274,7 +274,12 @@ class MainForceAnalyzerV2:
 
         # 技术指标统计（如果有）
         if self.tech_indicators_cache:
-            valid_tech = [v for v in self.tech_indicators_cache.values() if v.get('data_valid')]
+            # 统计缓存中的空值情况
+            null_count = sum(1 for v in self.tech_indicators_cache.values() if not v)
+            total_count = len(self.tech_indicators_cache)
+            print(f"[技术指标] 缓存总数: {total_count}, 空值: {null_count}, 有效: {total_count - null_count}")
+
+            valid_tech = [v for v in self.tech_indicators_cache.values() if v and v.get('data_valid')]
             if valid_tech:
                 rsi_values = [v.get('rsi6', 0) for v in valid_tech]
                 ma_aligned_count = sum(1 for v in valid_tech if v.get('ma_alignment'))
@@ -428,6 +433,10 @@ class MainForceAnalyzerV2:
         # 准备数据表格
         data_table = self._prepare_data_table(df, focus='fundamental')
 
+        # 获取历史财务数据（hikyuu）
+        print("  📊 正在获取历史财务数据...")
+        finance_history_table = self._get_finance_history_table(df)
+
         prompt = f"""
 你是一名资深的基本面分析师，现在需要你从财务质量和基本面角度分析这批股票。
 
@@ -436,6 +445,8 @@ class MainForceAnalyzerV2:
 
 【候选股票详细数据】（共{len(df)}只）
 {data_table}
+
+{finance_history_table}
 
 【分析任务】
 请从财务基本面的整体角度进行分析，重点关注：
@@ -451,7 +462,7 @@ class MainForceAnalyzerV2:
    - 高估值是否有业绩支撑？
 
 3. **成长性评估**
-   - 营收、净利润增长情况
+   - 营收、净利润增长趋势（查看历史财务数据）
    - 哪些股票成长性最好？
    - 成长能力评分较高的股票
 
@@ -473,6 +484,67 @@ class MainForceAnalyzerV2:
         time.sleep(1)
 
         return analysis
+
+    def _get_finance_history_table(self, df: pd.DataFrame, periods: int = 8) -> str:
+        """获取候选股票的历史财务数据表格"""
+        try:
+            import pandas as pd
+
+            finance_records = []
+            symbols_checked = set()
+
+            # 遍历候选股票，获取历史财务数据
+            for idx, row in df.iterrows():
+                symbol = row.get('股票代码', '')
+                if not symbol or symbol in symbols_checked:
+                    continue
+                symbols_checked.add(symbol)
+
+                # 调用selector的方法获取财务历史
+                finance_data = self.selector._get_finance_history_from_hikyuu(symbol, periods=periods)
+
+                if finance_data and finance_data.get('data'):
+                    for record in finance_data['data']:
+                        record['股票代码'] = symbol
+                        record['股票名称'] = finance_data.get('stock_name', '')
+                        finance_records.append(record)
+
+            if not finance_records:
+                print("  ⚠️ 未能获取历史财务数据")
+                return "\n\n【历史财务数据】\n  暂无历史财务数据\n"
+
+            # 转换为DataFrame并格式化
+            finance_df = pd.DataFrame(finance_records)
+
+            # 选择关键列
+            key_cols = ['股票代码', '股票名称', '结束日期', '净利润', '营业收入',
+                       '净资产收益率', '每股收益', '每股净资产', '资产负债率']
+
+            # 过滤存在的列
+            available_cols = [c for c in key_cols if c in finance_df.columns]
+            finance_df = finance_df[available_cols]
+
+            # 格式化数值
+            for col in finance_df.columns:
+                if col not in ['股票代码', '股票名称', '结束日期']:
+                    finance_df[col] = pd.to_numeric(finance_df[col], errors='coerce')
+
+            # 限制行数
+            if len(finance_df) > 100:
+                finance_df = finance_df.head(100)
+
+            table_str = finance_df.to_string(index=False)
+
+            print(f"  ✅ 获取到 {len(finance_records)} 条历史财务记录，覆盖 {len(symbols_checked)} 只股票")
+
+            return f"""
+【历史财务数据】（最近{periods}个季度）
+{table_str}
+"""
+
+        except Exception as e:
+            print(f"  ⚠️ 获取历史财务数据失败: {e}")
+            return "\n\n【历史财务数据】\n  获取失败\n"
 
     def _prepare_data_table(self, df: pd.DataFrame, focus: str = 'all') -> str:
         """准备数据表格用于AI分析"""
@@ -637,11 +709,13 @@ class MainForceAnalyzerV2:
             for rec in recommendations:
                 symbol = rec['symbol']
                 stock_data = df[df['股票代码'] == symbol]
-                if not stock_data.empty:
-                    rec['stock_data'] = stock_data.iloc[0].to_dict()
-                    # 添加技术指标
-                    if symbol in self.tech_indicators_cache:
-                        rec['tech_indicators'] = self.tech_indicators_cache[symbol]
+                if stock_data.empty:
+                    print(f"  ⚠️ 股票{symbol}在数据中未找到")
+                    continue
+                rec['stock_data'] = stock_data.iloc[0].to_dict()
+                # 添加技术指标
+                if symbol in self.tech_indicators_cache and self.tech_indicators_cache[symbol]:
+                    rec['tech_indicators'] = self.tech_indicators_cache[symbol]
                     # 添加评分信息
                     score_cols = ['综合评分', '技术面评分', '资金面评分', '基本面评分', '趋势面评分',
                                  '行业评分', '问财评分', '风控评分']
@@ -698,7 +772,7 @@ class MainForceAnalyzerV2:
 
         for idx, row in df.iterrows():
             symbol = row.get('股票代码', '')
-            if symbol in self.tech_indicators_cache:
+            if symbol in self.tech_indicators_cache and self.tech_indicators_cache[symbol]:
                 tech = self.tech_indicators_cache[symbol]
                 name = row.get('股票简称', row.get('名称', ''))
                 rsi = tech.get('rsi6', 0)

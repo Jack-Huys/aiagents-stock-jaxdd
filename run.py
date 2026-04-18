@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 AI股票分析系统启动脚本
 运行命令: python run.py
@@ -7,6 +8,12 @@ AI股票分析系统启动脚本
 import subprocess
 import sys
 import os
+import sys
+
+# 解决 Windows 控制台 UTF-8 输出问题
+if sys.platform == 'win32':
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
 
 def check_requirements():
     """检查必要的依赖是否安装"""

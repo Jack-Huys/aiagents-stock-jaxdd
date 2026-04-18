@@ -82,6 +82,14 @@ class MainForceStockSelectorV2:
                         print(f"  ⚠️ 方案{i}数据为空")
                         continue
 
+                    # 检查空值情况
+                    null_counts = df_result.isnull().sum()
+                    null_cols = null_counts[null_counts > 0]
+                    if not null_cols.empty:
+                        print(f"  ⚠️ 方案{i}存在空值列:")
+                        for col, count in null_cols.items():
+                            print(f"      {col}: {count}个空值 ({count/len(df_result)*100:.1f}%)")
+
                     print(f"  ✅ 方案{i}成功！获取到 {len(df_result)} 只股票")
                     self.raw_data = df_result
 
@@ -293,6 +301,7 @@ class MainForceStockSelectorV2:
     def get_technical_indicators(self, symbol: str, period: str = "3mo") -> Optional[Dict]:
         """
         获取单只股票的技术指标（用于高级筛选）
+        优先使用hikyuu本地数据，失败后降级到akshare
 
         Args:
             symbol: 股票代码
@@ -301,11 +310,297 @@ class MainForceStockSelectorV2:
         Returns:
             技术指标字典
         """
+        # 优先使用hikyuu获取数据
+        df = self._get_data_from_hikyuu(symbol)
+
+        # 如果hikyuu失败，降级到akshare
+        if df is None or df.empty or len(df) < 20:
+            df = self._get_data_from_akshare(symbol)
+
+        if df is None or df.empty or len(df) < 20:
+            return None
+
+        # 计算技术指标
+        close = df['收盘'].astype(float)
+        high = df['最高'].astype(float)
+        low = df['最低'].astype(float)
+        volume = df['成交量'].astype(float)
+
+        # ========== MA均线 ==========
+        ma5 = close.rolling(5).mean()
+        ma10 = close.rolling(10).mean()
+        ma20 = close.rolling(20).mean()
+        ma60 = close.rolling(60).mean()
+
+        # ========== RSI ==========
+        delta = close.diff()
+        gain = delta.where(delta > 0, 0).rolling(6).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(6).mean()
+        rs = gain / loss
+        rsi6 = 100 - (100 / (1 + rs))
+
+        # ========== MACD ==========
+        ema12 = close.ewm(span=12).mean()
+        ema26 = close.ewm(span=26).mean()
+        macd_dif = ema12 - ema26
+        macd_dea = macd_dif.ewm(span=9).mean()
+        macd_hist = (macd_dif - macd_dea) * 2
+
+        # ========== KDJ ==========
+        n = 9
+        low_n = low.rolling(n).min()
+        high_n = high.rolling(n).max()
+        rsv = (close - low_n) / (high_n - low_n) * 100
+        rsv = rsv.fillna(50)
+        k = rsv.ewm(com=2).mean()
+        d = k.ewm(com=2).mean()
+        j = 3 * k - 2 * d
+
+        # ========== 布林带 ==========
+        boll_mid = close.rolling(20).mean()
+        boll_std = close.rolling(20).std()
+        boll_upper = boll_mid + 2 * boll_std
+        boll_lower = boll_mid - 2 * boll_std
+
+        # ========== 量价配合分析 ==========
+        volume_change = volume.pct_change()
+        price_change = close.pct_change()
+
+        vol_price_score = 0
+        vol_price_signals = []
+
+        for i in range(-5, 0):
+            if i >= -len(volume_change) and i >= -len(price_change):
+                vol_ch = volume_change.iloc[i] if not pd.isna(volume_change.iloc[i]) else 0
+                price_ch = price_change.iloc[i] if not pd.isna(price_change.iloc[i]) else 0
+
+                if vol_ch > 0.1 and price_ch > 0.01:
+                    vol_price_signals.append(1)
+                elif vol_ch > 0.1 and price_ch < -0.01:
+                    vol_price_signals.append(-1)
+                elif vol_ch < -0.1 and abs(price_ch) < 0.01:
+                    vol_price_signals.append(0.5)
+                else:
+                    vol_price_signals.append(0)
+
+        vol_price_score = sum(vol_price_signals) / len(vol_price_signals) * 20 if vol_price_signals else 0
+
+        # 量比
+        avg_volume_5 = volume.tail(5).mean()
+        avg_volume_10 = volume.tail(10).mean()
+        volume_ratio = avg_volume_5 / avg_volume_10 if avg_volume_10 > 0 else 1
+
+        # 能量潮OBV
+        obv = (np.sign(close.diff()) * volume).cumsum()
+        obv_trend = 1 if obv.iloc[-1] > obv.iloc[-5] else -1 if obv.iloc[-1] < obv.iloc[-5] else 0
+
+        # 成交量加权价格变化
+        price_volume_corr = close.diff().corr(volume) if len(close) > 5 else 0
+
+        # ========== 当前值 ==========
+        current_price = close.iloc[-1]
+        current_ma5 = ma5.iloc[-1]
+        current_ma10 = ma10.iloc[-1]
+        current_ma20 = ma20.iloc[-1]
+        current_ma60 = ma60.iloc[-1] if len(ma60) >= 60 else None
+        current_rsi6 = rsi6.iloc[-1]
+        current_macd_dif = macd_dif.iloc[-1]
+        current_macd_dea = macd_dea.iloc[-1]
+        current_macd_hist = macd_hist.iloc[-1]
+        current_k = k.iloc[-1]
+        current_d = d.iloc[-1]
+        current_j = j.iloc[-1]
+        current_boll_mid = boll_mid.iloc[-1]
+        current_boll_upper = boll_upper.iloc[-1]
+        current_boll_lower = boll_lower.iloc[-1]
+
+        # ========== 判断条件 ==========
+        rsi_healthy = 30 <= current_rsi6 <= 80
+
+        # MACD金叉
+        macd_golden_cross_days = 0
+        for i in range(1, min(11, len(macd_hist))):
+            if macd_hist.iloc[-i-1] < 0 and macd_hist.iloc[-i] >= 0:
+                macd_golden_cross_days = i
+                break
+
+        # MACD死叉
+        macd_dead_cross_days = 0
+        for i in range(1, min(11, len(macd_hist))):
+            if macd_hist.iloc[-i-1] > 0 and macd_hist.iloc[-i] <= 0:
+                macd_dead_cross_days = i
+                break
+
+        # KDJ金叉
+        kdj_golden_cross_days = 0
+        for i in range(1, min(11, len(k))):
+            if k.iloc[-i-1] < d.iloc[-i-1] and k.iloc[-i] >= d.iloc[-i]:
+                kdj_golden_cross_days = i
+                break
+
+        # KDJ超买超卖
+        kdj_overbought = current_k > 80 and current_d > 80
+        kdj_oversold = current_k < 20 and current_d < 20
+
+        # 均线多头排列
+        ma_alignment = False
+        if current_ma5 and current_ma10 and current_ma20:
+            if current_ma60:
+                ma_alignment = current_ma5 > current_ma10 > current_ma20 > current_ma60
+            else:
+                ma_alignment = current_ma5 > current_ma10 > current_ma20
+
+        # 均线空头排列
+        ma_bearish = False
+        if current_ma5 and current_ma10 and current_ma20:
+            if current_ma60:
+                ma_bearish = current_ma5 < current_ma10 < current_ma20 < current_ma60
+            else:
+                ma_bearish = current_ma5 < current_ma10 < current_ma20
+
+        # 突破20日均线
+        price_breakout_20ma = current_price > current_ma20
+
+        # 布林带中轨支撑
+        boll_mid_support = current_price >= current_boll_mid
+
+        # 振幅
+        recent_high = high.tail(20).max()
+        recent_low = low.tail(20).min()
+        amplitude = (recent_high - recent_low) / recent_low * 100 if recent_low > 0 else 0
+
+        # 股价位置（相对布林带）
+        boll_position = (current_price - current_boll_lower) / (current_boll_upper - current_boll_lower) * 100 if current_boll_upper > current_boll_lower else 50
+
+        return {
+            'symbol': symbol,
+            'current_price': current_price,
+            'ma5': current_ma5,
+            'ma10': current_ma10,
+            'ma20': current_ma20,
+            'ma60': current_ma60,
+            'ma_alignment': ma_alignment,
+            'ma_bearish': ma_bearish,
+            'rsi6': current_rsi6,
+            'rsi_healthy': rsi_healthy,
+            'macd_dif': current_macd_dif,
+            'macd_dea': current_macd_dea,
+            'macd_hist': current_macd_hist,
+            'macd_golden_cross_days': macd_golden_cross_days,
+            'macd_dead_cross_days': macd_dead_cross_days,
+            'kdj_k': current_k,
+            'kdj_d': current_d,
+            'kdj_j': current_j,
+            'kdj_golden_cross_days': kdj_golden_cross_days,
+            'kdj_overbought': kdj_overbought,
+            'kdj_oversold': kdj_oversold,
+            'boll_mid': current_boll_mid,
+            'boll_upper': current_boll_upper,
+            'boll_lower': current_boll_lower,
+            'boll_mid_support': boll_mid_support,
+            'boll_position': boll_position,
+            'amplitude': amplitude,
+            'volume_ratio': volume_ratio,
+            'vol_price_score': vol_price_score,
+            'obv_trend': obv_trend,
+            'price_volume_corr': price_volume_corr,
+            'price_breakout_20ma': price_breakout_20ma,
+            'data_valid': True
+        }
+
+    def _get_data_from_hikyuu(self, symbol: str) -> Optional[pd.DataFrame]:
+        """
+        从hikyuu本地数据库获取股票数据
+
+        Args:
+            symbol: 股票代码
+
+        Returns:
+            DataFrame或None
+        """
+        try:
+            import os
+            from hikyuu import hikyuu_init, get_stock, Query
+
+            # 确保hikyuu已初始化（使用缓存避免重复初始化）
+            if not hasattr(self, '_hikyuu_initialized'):
+                config_file = os.path.expanduser('~') + '/.hikyuu/hikyuu.ini'
+                print(f"[Hikyuu] 初始化数据源, config: {config_file}")
+                hikyuu_init(config_file)
+                self._hikyuu_initialized = True
+                print(f"[Hikyuu] 初始化完成")
+
+            # 去除后缀（如 .SH, .SZ, .BJ）
+            clean_symbol = symbol.split('.')[0]
+
+            # 确定市场前缀
+            if clean_symbol.startswith('6') or clean_symbol.startswith('9'):
+                market = 'sh'
+            elif clean_symbol.startswith('0') or clean_symbol.startswith('3'):
+                market = 'sz'
+            elif clean_symbol.startswith('4') or clean_symbol.startswith('8'):
+                market = 'bj'
+            else:
+                print(f"[Hikyuu] 不支持的股票代码格式: {clean_symbol}")
+                return None
+
+            # 构建hikyuu格式的股票代码
+            hikyuu_code = f"{market}{clean_symbol}"
+            print(f"[Hikyuu] 获取股票: {hikyuu_code}")
+
+            # 获取股票
+            stock = get_stock(hikyuu_code)
+            if stock.is_null():
+                print(f"[Hikyuu] 股票不存在: {hikyuu_code}")
+                return None
+
+            print(f"[Hikyuu] 获取K线数据: {hikyuu_code}")
+            # 获取日K线数据（最近150个交易日）
+            kdata = stock.get_kdata(Query(-150))
+            if len(kdata) < 20:
+                print(f"[Hikyuu] K线数据不足: {hikyuu_code}, 数量={len(kdata)}")
+                return None
+
+            print(f"[Hikyuu] 转换数据为DataFrame: {hikyuu_code}, 共{len(kdata)}条")
+            # 转换为DataFrame
+            records = []
+            for i in range(len(kdata)):
+                records.append({
+                    '日期': str(kdata[i].datetime)[:10],  # 取日期部分 YYYY-MM-DD
+                    '开盘': kdata[i].open,
+                    '最高': kdata[i].high,
+                    '最低': kdata[i].low,
+                    '收盘': kdata[i].close,
+                    '成交量': kdata[i].volume,
+                    '成交额': kdata[i].amount if hasattr(kdata[i], 'amount') else 0
+                })
+
+            df = pd.DataFrame(records)
+            df['日期'] = pd.to_datetime(df['日期'])
+            print(f"[Hikyuu] 获取成功: {hikyuu_code}, 共{len(df)}条, 日期范围: {df['日期'].min()} ~ {df['日期'].max()}")
+            return df.reset_index(drop=True)
+
+        except ImportError:
+            print(f"[Hikyuu] hikyuu未安装")
+            return None
+        except Exception as e:
+            print(f"[Hikyuu] 获取失败: {symbol}, 错误: {e}")
+            return None
+
+    def _get_data_from_akshare(self, symbol: str) -> Optional[pd.DataFrame]:
+        """
+        从akshare获取股票数据（降级方案）
+
+        Args:
+            symbol: 股票代码
+
+        Returns:
+            DataFrame或None
+        """
         import requests
         from requests.adapters import HTTPAdapter
         from urllib3.util.retry import Retry
 
-        # 创建带重试的session
         session = requests.Session()
         retry = Retry(total=2, backoff_factor=0.5, status_forcelist=[502, 503, 504])
         adapter = HTTPAdapter(max_retries=retry)
@@ -313,228 +608,135 @@ class MainForceStockSelectorV2:
         session.mount('https://', adapter)
 
         try:
-            # 获取日线数据（带重试）
             max_retries = 3
             df = None
 
             for attempt in range(max_retries):
                 try:
-                    df = ak.stock_zh_a_hist(symbol=symbol, period="daily",
-                                            start_date=(datetime.now() - timedelta(days=150)).strftime('%Y%m%d'),
-                                            end_date=datetime.now().strftime('%Y%m%d'),
-                                            adjust='qfq')
+                    df = ak.stock_zh_a_hist(
+                        symbol=symbol,
+                        period="daily",
+                        start_date=(datetime.now() - timedelta(days=150)).strftime('%Y%m%d'),
+                        end_date=datetime.now().strftime('%Y%m%d'),
+                        adjust='qfq'
+                    )
                     break
-                except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError) as e:
+                except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError):
                     if attempt < max_retries - 1:
-                        print(f"  第{attempt+1}次获取{symbol}数据失败，1秒后重试...")
                         time.sleep(1)
                     else:
                         raise
 
-            if df is None or df.empty or len(df) < 20:
+            return df
+
+        except Exception:
+            return None
+
+    def _get_finance_history_from_hikyuu(self, symbol: str, periods: int = 12) -> Optional[Dict]:
+        """
+        从hikyuu获取历史财务数据
+
+        Args:
+            symbol: 股票代码（如 600000, 000001）
+            periods: 获取最近N个季度数据（默认12个季度=3年）
+
+        Returns:
+            历史财务数据字典
+        """
+        try:
+            import os
+            from hikyuu import hikyuu_init, get_stock, StockManager
+
+            # 确保hikyuu已初始化
+            if not hasattr(self, '_hikyuu_initialized'):
+                config_file = os.path.expanduser('~') + '/.hikyuu/hikyuu.ini'
+                hikyuu_init(config_file)
+                self._hikyuu_initialized = True
+
+            # 去除后缀
+            clean_symbol = symbol.split('.')[0]
+
+            # 确定市场前缀
+            if clean_symbol.startswith('6') or clean_symbol.startswith('9'):
+                market = 'sh'
+            elif clean_symbol.startswith('0') or clean_symbol.startswith('3'):
+                market = 'sz'
+            elif clean_symbol.startswith('4') or clean_symbol.startswith('8'):
+                market = 'bj'
+            else:
                 return None
 
-            # 计算技术指标
-            close = df['收盘'].astype(float)
-            high = df['最高'].astype(float)
-            low = df['最低'].astype(float)
-            volume = df['成交量'].astype(float)
+            hikyuu_code = f"{market}{clean_symbol}"
+            stock = get_stock(hikyuu_code)
 
-            # ========== MA均线 ==========
-            ma5 = close.rolling(5).mean()
-            ma10 = close.rolling(10).mean()
-            ma20 = close.rolling(20).mean()
-            ma60 = close.rolling(60).mean()
+            if stock.is_null():
+                print(f"[Hikyuu Finance] 股票不存在: {hikyuu_code}")
+                return None
 
-            # ========== RSI ==========
-            delta = close.diff()
-            gain = delta.where(delta > 0, 0).rolling(6).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(6).mean()
-            rs = gain / loss
-            rsi6 = 100 - (100 / (1 + rs))
+            # 获取历史财务数据
+            finance_data = stock.get_history_finance()
+            if not finance_data or len(finance_data) == 0:
+                print(f"[Hikyuu Finance] 无财务数据: {hikyuu_code}")
+                return None
 
-            # ========== MACD ==========
-            ema12 = close.ewm(span=12).mean()
-            ema26 = close.ewm(span=26).mean()
-            macd_dif = ema12 - ema26
-            macd_dea = macd_dif.ewm(span=9).mean()
-            macd_hist = (macd_dif - macd_dea) * 2
+            # 获取字段名
+            sm = StockManager.instance()
 
-            # ========== KDJ ==========
-            n = 9
-            low_n = low.rolling(n).min()
-            high_n = high.rolling(n).max()
-            rsv = (close - low_n) / (high_n - low_n) * 100
-            rsv = rsv.fillna(50)
-            k = rsv.ewm(com=2).mean()
-            d = k.ewm(com=2).mean()
-            j = 3 * k - 2 * d
+            # 关键字段索引（需要从字段列表中查找）
+            # 常见字段：净利润(176-192), 营收(230-235), ROE等
+            key_fields = {
+                '净利润': None,
+                '营业收入': None,
+                '净资产收益率': None,
+                '每股收益': None,
+                '每股净资产': None,
+                '资产负债率': None,
+                '经营活动现金流': None,
+            }
 
-            # ========== 布林带 ==========
-            boll_mid = close.rolling(20).mean()
-            boll_std = close.rolling(20).std()
-            boll_upper = boll_mid + 2 * boll_std
-            boll_lower = boll_mid - 2 * boll_std
+            # 从all_fields获取字段名和索引的映射
+            all_fields = sm.get_history_finance_all_fields()
+            for idx, field_tuple in enumerate(all_fields):
+                field_name = field_tuple[1]
+                for key in key_fields:
+                    if key in field_name and key_fields[key] is None:
+                        key_fields[key] = idx
 
-            # ========== 量价配合分析 ==========
-            # 成交量与价格变动的关系
-            volume_change = volume.pct_change()
-            price_change = close.pct_change()
+            # 取最近N个季度的数据
+            recent_finance = finance_data[-periods:] if len(finance_data) >= periods else finance_data
 
-            # 量增价涨(1)/量增价跌(-1)/量缩价稳(0)
-            vol_price_score = 0
-            vol_price_signals = []
+            # 整理数据
+            finance_records = []
+            for item in recent_finance:
+                start_date, end_date, data = item
+                record = {
+                    '开始日期': str(start_date)[:10],
+                    '结束日期': str(end_date)[:10],
+                }
 
-            # 最近5天量价配合分析
-            for i in range(-5, 0):
-                if i >= -len(volume_change) and i >= -len(price_change):
-                    vol_ch = volume_change.iloc[i] if not pd.isna(volume_change.iloc[i]) else 0
-                    price_ch = price_change.iloc[i] if not pd.isna(price_change.iloc[i]) else 0
-
-                    if vol_ch > 0.1 and price_ch > 0.01:
-                        vol_price_signals.append(1)  # 量增价涨
-                    elif vol_ch > 0.1 and price_ch < -0.01:
-                        vol_price_signals.append(-1)  # 量增价跌（背离）
-                    elif vol_ch < -0.1 and abs(price_ch) < 0.01:
-                        vol_price_signals.append(0.5)  # 量缩价稳
+                # 添加关键字段
+                for field_name, field_idx in key_fields.items():
+                    if field_idx is not None and field_idx < len(data):
+                        record[field_name] = data[field_idx]
                     else:
-                        vol_price_signals.append(0)
+                        record[field_name] = None
 
-            vol_price_score = sum(vol_price_signals) / len(vol_price_signals) * 20 if vol_price_signals else 0
+                finance_records.append(record)
 
-            # 量比
-            avg_volume_5 = volume.tail(5).mean()
-            avg_volume_10 = volume.tail(10).mean()
-            volume_ratio = avg_volume_5 / avg_volume_10 if avg_volume_10 > 0 else 1
-
-            # 能量潮OBV
-            obv = (np.sign(close.diff()) * volume).cumsum()
-            obv_trend = 1 if obv.iloc[-1] > obv.iloc[-5] else -1 if obv.iloc[-1] < obv.iloc[-5] else 0
-
-            # 成交量加权价格变化
-            price_volume_corr = close.diff().corr(volume) if len(close) > 5 else 0
-
-            # ========== 当前值 ==========
-            current_price = close.iloc[-1]
-            current_ma5 = ma5.iloc[-1]
-            current_ma10 = ma10.iloc[-1]
-            current_ma20 = ma20.iloc[-1]
-            current_ma60 = ma60.iloc[-1] if len(ma60) >= 60 else None
-            current_rsi6 = rsi6.iloc[-1]
-            current_macd_dif = macd_dif.iloc[-1]
-            current_macd_dea = macd_dea.iloc[-1]
-            current_macd_hist = macd_hist.iloc[-1]
-            current_k = k.iloc[-1]
-            current_d = d.iloc[-1]
-            current_j = j.iloc[-1]
-            current_boll_mid = boll_mid.iloc[-1]
-            current_boll_upper = boll_upper.iloc[-1]
-            current_boll_lower = boll_lower.iloc[-1]
-
-            # ========== 判断条件 ==========
-            # 1. RSI健康区间
-            rsi_healthy = 30 <= current_rsi6 <= 80
-
-            # 2. MACD金叉 (DIF上穿DEA)
-            macd_golden_cross_days = 0
-            for i in range(1, min(11, len(macd_hist))):
-                if macd_hist.iloc[-i-1] < 0 and macd_hist.iloc[-i] >= 0:
-                    macd_golden_cross_days = i
-                    break
-
-            # 3. MACD死叉
-            macd_dead_cross_days = 0
-            for i in range(1, min(11, len(macd_hist))):
-                if macd_hist.iloc[-i-1] > 0 and macd_hist.iloc[-i] <= 0:
-                    macd_dead_cross_days = i
-                    break
-
-            # 4. KDJ金叉
-            kdj_golden_cross_days = 0
-            for i in range(1, min(11, len(k))):
-                if k.iloc[-i-1] < d.iloc[-i-1] and k.iloc[-i] >= d.iloc[-i]:
-                    kdj_golden_cross_days = i
-                    break
-
-            # 5. KDJ超买超卖
-            kdj_overbought = current_k > 80 and current_d > 80  # 超买
-            kdj_oversold = current_k < 20 and current_d < 20    # 超卖
-
-            # 6. 均线多头排列
-            ma_alignment = False
-            if current_ma5 and current_ma10 and current_ma20:
-                if current_ma60:
-                    ma_alignment = current_ma5 > current_ma10 > current_ma20 > current_ma60
-                else:
-                    ma_alignment = current_ma5 > current_ma10 > current_ma20
-
-            # 7. 均线空头排列
-            ma_bearish = False
-            if current_ma5 and current_ma10 and current_ma20:
-                if current_ma60:
-                    ma_bearish = current_ma5 < current_ma10 < current_ma20 < current_ma60
-                else:
-                    ma_bearish = current_ma5 < current_ma10 < current_ma20
-
-            # 8. 突破20日均线
-            price_breakout_20ma = current_price > current_ma20
-
-            # 9. 布林带中轨支撑
-            boll_mid_support = current_price >= current_boll_mid
-
-            # 10. 振幅
-            recent_high = high.tail(20).max()
-            recent_low = low.tail(20).min()
-            amplitude = (recent_high - recent_low) / recent_low * 100 if recent_low > 0 else 0
-
-            # 11. 股价位置（相对布林带）
-            boll_position = (current_price - current_boll_lower) / (current_boll_upper - current_boll_lower) * 100 if current_boll_upper > current_boll_lower else 50
+            print(f"[Hikyuu Finance] 获取成功: {hikyuu_code}, 共{len(finance_records)}个季度")
 
             return {
                 'symbol': symbol,
-                'current_price': current_price,
-                # MA
-                'ma5': current_ma5,
-                'ma10': current_ma10,
-                'ma20': current_ma20,
-                'ma60': current_ma60,
-                'ma_alignment': ma_alignment,
-                'ma_bearish': ma_bearish,
-                # RSI
-                'rsi6': current_rsi6,
-                'rsi_healthy': rsi_healthy,
-                # MACD
-                'macd_dif': current_macd_dif,
-                'macd_dea': current_macd_dea,
-                'macd_hist': current_macd_hist,
-                'macd_golden_cross_days': macd_golden_cross_days,
-                'macd_dead_cross_days': macd_dead_cross_days,
-                # KDJ
-                'kdj_k': current_k,
-                'kdj_d': current_d,
-                'kdj_j': current_j,
-                'kdj_golden_cross_days': kdj_golden_cross_days,
-                'kdj_overbought': kdj_overbought,
-                'kdj_oversold': kdj_oversold,
-                # 布林带
-                'boll_mid': current_boll_mid,
-                'boll_upper': current_boll_upper,
-                'boll_lower': current_boll_lower,
-                'boll_mid_support': boll_mid_support,
-                'boll_position': boll_position,
-                # 量价
-                'amplitude': amplitude,
-                'volume_ratio': volume_ratio,
-                'vol_price_score': vol_price_score,
-                'obv_trend': obv_trend,
-                'price_volume_corr': price_volume_corr,
-                # 状态
-                'price_breakout_20ma': price_breakout_20ma,
-                'data_valid': True
+                'stock_name': stock.name,
+                'data': finance_records,
+                'periods': len(finance_records)
             }
 
+        except ImportError:
+            print(f"[Hikyuu Finance] hikyuu未安装")
+            return None
         except Exception as e:
-            print(f"  ⚠️ 获取{symbol}技术指标失败: {e}")
+            print(f"[Hikyuu Finance] 获取失败: {symbol}, 错误: {e}")
             return None
 
     def get_fund_flow_indicators(self, symbol: str, days: int = 5) -> Optional[Dict]:
@@ -887,83 +1089,236 @@ advanced_filter_config = AdvancedFilterConfig()
 
 
 class MultiDimensionScorer:
-    """多维度评分加权排序类"""
+    """多维度评分加权排序类 - 优化版"""
 
-    # 各策略的权重配置（已增加行业相对强弱和风控维度）
+    # ========== 市场环境常量 ==========
+    MARKET_ENVIRONMENT = {
+        'BULL': {   # 牛市环境
+            'rsi_optimal_min': 40,
+            'rsi_optimal_max': 75,
+            'rsi_overbought': 85,
+            'rsi_oversold': 25,
+            'amplitude_boost': 1.2,      # 振幅加分系数
+            'momentum_boost': 1.3,       # 动量系数
+            'risk_tolerance': 0.8,       # 风险容忍度
+        },
+        'BEAR': {   # 熊市环境
+            'rsi_optimal_min': 20,
+            'rsi_optimal_max': 60,
+            'rsi_overbought': 70,
+            'rsi_oversold': 30,
+            'amplitude_boost': 0.7,
+            'momentum_boost': 0.8,
+            'risk_tolerance': 1.2,
+        },
+        'NEUTRAL': {  # 震荡环境
+            'rsi_optimal_min': 30,
+            'rsi_optimal_max': 70,
+            'rsi_overbought': 80,
+            'rsi_oversold': 20,
+            'amplitude_boost': 1.0,
+            'momentum_boost': 1.0,
+            'risk_tolerance': 1.0,
+        }
+    }
+
+    # ========== 优化后的各策略权重配置 ==========
     STRATEGY_WEIGHTS = {
         '激进型': {
             'description': '追求短期爆发，侧重资金面和技术面',
-            'tech': 0.25,      # 技术面权重25%
-            'fund': 0.30,      # 资金面权重30%
-            'fundamental': 0.10,  # 基本面权重10%
-            'trend': 0.10,     # 趋势面权重10%
-            'industry': 0.10,  # 行业相对强弱10%
-            'wencai': 0.10,    # 问财评分权重10%
-            'risk': 0.05,      # 风控评分5%
+            'tech': 0.28,         # 技术面权重提高到28%
+            'fund': 0.32,         # 资金面权重提高到32%
+            'fundamental': 0.08,   # 基本面降低到8%
+            'trend': 0.08,        # 趋势降低到8%
+            'industry': 0.08,     # 行业8%
+            'momentum': 0.08,     # 新增动量因子8%
+            'risk': 0.08,         # 风控8%
         },
         '稳健型': {
             'description': '追求稳定收益，平衡各维度',
             'tech': 0.15,
-            'fund': 0.20,
-            'fundamental': 0.20,
-            'trend': 0.15,
+            'fund': 0.18,
+            'fundamental': 0.18,
+            'trend': 0.12,
             'industry': 0.10,
-            'wencai': 0.10,
-            'risk': 0.10,
+            'momentum': 0.10,     # 动量因子
+            'risk': 0.17,
         },
         '价值型': {
             'description': '追求长期价值，侧重基本面',
             'tech': 0.05,
-            'fund': 0.10,
-            'fundamental': 0.35,
+            'fund': 0.08,
+            'fundamental': 0.30,
             'trend': 0.10,
-            'industry': 0.15,
-            'wencai': 0.15,
-            'risk': 0.10,
+            'industry': 0.12,
+            'momentum': 0.15,
+            'risk': 0.20,
         },
         '自定义': {
             'description': '自定义权重',
-            'tech': 0.20,
-            'fund': 0.20,
-            'fundamental': 0.20,
+            'tech': 0.18,
+            'fund': 0.18,
+            'fundamental': 0.18,
             'trend': 0.10,
             'industry': 0.10,
-            'wencai': 0.10,
-            'risk': 0.10,
+            'momentum': 0.08,
+            'risk': 0.18,
         }
     }
 
-    # 各维度内部指标权重
+    # ========== 优化后的各维度内部指标权重 ==========
+    # 基于统计规律优化：高有效性指标给予更高权重
     TECH_WEIGHTS = {
-        'rsi': 0.15,           # RSI健康度
-        'macd': 0.15,          # MACD趋势
-        'kdj': 0.15,           # KDJ指标
-        'ma_alignment': 0.20,  # 均线多头
-        'boll_position': 0.15, # 布林带位置
-        'vol_price': 0.10,     # 量价配合
+        'rsi': 0.12,            # RSI健康度 - 降低权重
+        'macd': 0.18,          # MACD趋势 - 提高权重（趋势确认更强）
+        'kdj': 0.12,            # KDJ指标 - 降低权重
+        'ma_alignment': 0.20,  # 均线多头 - 保持最高权重
+        'boll_position': 0.13,  # 布林带位置
+        'vol_price': 0.15,     # 量价配合 - 提高权重（资金真伪识别）
         'volume_ratio': 0.10,  # 量比
     }
 
+    # 资金面权重优化：连续性比单日规模更重要
     FUND_WEIGHTS = {
-        'main_ratio': 0.35,    # 主力占比
-        'consecutive_days': 0.30,  # 连续天数
-        'super_inflow': 0.20,  # 超大单
-        'north_bound': 0.15,   # 北向资金
+        'main_ratio': 0.25,        # 主力占比 - 降低
+        'consecutive_days': 0.40,  # 连续天数 - 大幅提高（持续性更重要）
+        'super_inflow': 0.15,      # 超大单 - 降低
+        'north_bound': 0.12,       # 北向资金 - 降低
+        'inflow_momentum': 0.08,   # 新增：流入动量
     }
 
+    # 基本面权重优化：成长性权重提高
     FUNDAMENTAL_WEIGHTS = {
-        'roe': 0.30,           # ROE
-        'profit_growth': 0.25, # 利润增长
-        'peg': 0.20,           # PEG
-        'dividend': 0.15,      # 股息率
-        'debt_ratio': 0.10,    # 资产负债率
+        'roe': 0.25,            # ROE - 降低
+        'profit_growth': 0.30,  # 利润增长 - 提高（成长性更重要）
+        'peg': 0.20,            # PEG - 保持
+        'dividend': 0.10,       # 股息率 - 降低
+        'debt_ratio': 0.15,     # 资产负债率 - 提高
     }
 
+    # 趋势权重优化
     TREND_WEIGHTS = {
-        'amplitude': 0.30,     # 振幅
-        'year_ma': 0.40,       # 年线位置
-        'chip': 0.30,          # 筹码集中
+        'amplitude': 0.20,      # 振幅 - 降低
+        'year_ma': 0.45,       # 年线位置 - 大幅提高（趋势判断核心）
+        'chip': 0.20,          # 筹码集中 - 保持
+        'momentum_alignment': 0.15,  # 新增：多周期动量对齐
     }
+
+    # ========== 指标共振系数表 ==========
+    # 多指标同时看涨时的加成系数
+    RESONANCE_BONUS = {
+        # (指标1, 指标2): 加成分
+        ('macd_golden', 'kdj_golden'): 8,      # MACD金叉 + KDJ金叉
+        ('macd_golden', 'ma_alignment'): 6,    # MACD金叉 + 均线多头
+        ('kdj_golden', 'ma_alignment'): 6,     # KDJ金叉 + 均线多头
+        ('ma_alignment', 'boll_support'): 5,   # 均线多头 + 布林支撑
+        ('macd_golden', 'vol_breakout'): 5,    # MACD金叉 + 放量突破
+        ('kdj_golden', 'vol_breakout'): 4,     # KDJ金叉 + 放量突破
+        ('rsi_healthy', 'ma_alignment'): 4,   # RSI健康 + 均线多头
+        ('boll_support', 'vol_price_good'): 4, # 布林支撑 + 量价配合
+    }
+
+    # 指标冲突惩罚
+    CONFLICT_PENALTY = {
+        ('macd_dead', 'kdj_golden'): -5,       # MACD死叉 vs KDJ金叉
+        ('kdj_overbought', 'rsi_oversold'): -6, # KDJ超买 vs RSI超卖
+        ('ma_bearish', 'ma_alignment'): -8,    # 均线空头 vs 多头排列
+        ('macd_dead', 'ma_alignment'): -6,    # MACD死叉 vs 均线多头
+    }
+
+    @classmethod
+    def detect_market_environment(cls) -> str:
+        """
+        检测当前市场环境
+        通过判断沪深300指数的均线位置和RSI来识别牛熊市
+        """
+        try:
+            import akshare as ak
+            from datetime import datetime, timedelta
+
+            # 获取沪深300指数数据
+            end_date = datetime.now().strftime('%Y%m%d')
+            start_date = (datetime.now() - timedelta(days=60)).strftime('%Y%m%d')
+
+            df = ak.stock_zh_index_daily(symbol="sh000300")
+            df = df[(df['date'] >= start_date) & (df['date'] <= end_date)]
+
+            if df.empty or len(df) < 20:
+                return 'NEUTRAL'
+
+            close = df['close'].astype(float)
+            ma20 = close.rolling(20).mean().iloc[-1]
+            ma60 = close.rolling(60).mean().iloc[-60] if len(df) >= 60 else close.mean()
+
+            current_price = close.iloc[-1]
+            recent_high = close.tail(20).max()
+            recent_low = close.tail(20).min()
+
+            # 计算RSI
+            delta = close.diff()
+            gain = delta.where(delta > 0, 0).rolling(14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+            rs = gain / loss
+            rsi = (100 - (100 / (1 + rs))).iloc[-1]
+
+            # 判断环境
+            if current_price > ma20 and current_price > ma60 and rsi > 55:
+                return 'BULL'
+            elif current_price < ma20 and current_price < ma60 and rsi < 45:
+                return 'BEAR'
+            else:
+                return 'NEUTRAL'
+
+        except Exception:
+            return 'NEUTRAL'
+
+    @classmethod
+    def calculate_resonance_bonus(cls, tech_info: Dict) -> float:
+        """
+        计算指标共振加成
+        当多个指标同时发出看涨信号时给予额外加分
+        """
+        if not tech_info:
+            return 0
+
+        bonus = 0
+        signals = set()
+
+        # 收集看涨信号
+        if tech_info.get('macd_golden_cross_days', 0) <= 5:
+            signals.add('macd_golden')
+        if tech_info.get('macd_dead_cross_days', 0) <= 5:
+            signals.add('macd_dead')
+        if tech_info.get('kdj_golden_cross_days', 0) <= 5:
+            signals.add('kdj_golden')
+        if tech_info.get('kdj_overbought'):
+            signals.add('kdj_overbought')
+        if tech_info.get('kdj_oversold'):
+            signals.add('kdj_oversold')
+        if tech_info.get('ma_alignment'):
+            signals.add('ma_alignment')
+        if tech_info.get('ma_bearish'):
+            signals.add('ma_bearish')
+        if tech_info.get('boll_mid_support'):
+            signals.add('boll_support')
+        if tech_info.get('vol_price_score', 0) > 10:
+            signals.add('vol_price_good')
+        if tech_info.get('volume_ratio', 1) > 1.5:
+            signals.add('vol_breakout')
+        if 30 <= tech_info.get('rsi6', 50) <= 70:
+            signals.add('rsi_healthy')
+
+        # 检查共振加成
+        for (sig1, sig2), bonus_score in cls.RESONANCE_BONUS.items():
+            if sig1 in signals and sig2 in signals:
+                bonus += bonus_score
+
+        # 检查冲突惩罚
+        for (sig1, sig2), penalty in cls.CONFLICT_PENALTY.items():
+            if sig1 in signals and sig2 in signals:
+                bonus += penalty
+
+        return max(-15, min(15, bonus))  # 限制在-15到+15之间
 
     @classmethod
     def get_weights(cls, strategy: str = '稳健型') -> Dict:
@@ -971,156 +1326,296 @@ class MultiDimensionScorer:
         return cls.STRATEGY_WEIGHTS.get(strategy, cls.STRATEGY_WEIGHTS['稳健型'])
 
     @classmethod
-    def calculate_technical_score(cls, tech_info: Dict) -> float:
-        """计算技术面得分 (0-100)"""
+    def calculate_technical_score(cls, tech_info: Dict, market_env: str = None) -> float:
+        """
+        计算技术面得分 (0-100)
+        优化版：引入市场环境感知和指标共振
+        """
         if not tech_info or not tech_info.get('data_valid'):
-            return 50  # 默认中等分数
+            return 50
 
+        # 检测市场环境
+        if market_env is None:
+            market_env = cls.detect_market_environment()
+
+        env = cls.MARKET_ENVIRONMENT.get(market_env, cls.MARKET_ENVIRONMENT['NEUTRAL'])
         score = 0
 
-        # RSI健康度 (0-100)
+        # ========== RSI健康度 (0-100) ==========
         rsi = tech_info.get('rsi6', 50)
-        if 30 <= rsi <= 70:
-            rsi_score = 100 - abs(rsi - 50) * 1.5
+        rsi_min = env['rsi_optimal_min']
+        rsi_max = env['rsi_optimal_max']
+
+        if rsi_min <= rsi <= rsi_max:
+            # 在最优区间内，越靠近50分越高
+            rsi_score = 100 - abs(rsi - 50) * 1.2
+        elif rsi < rsi_min:
+            # 超卖区域 - 牛市给高分，熊市给低分
+            rsi_score = max(0, 40 - (rsi_min - rsi) * 2) * env.get('risk_tolerance', 1.0)
         else:
-            rsi_score = max(0, 50 - (abs(rsi - 70) if rsi > 70 else abs(rsi - 30)) * 2)
+            # 超买区域 - 熊市给高分，牛市给低分
+            rsi_score = max(0, 40 - (rsi - rsi_max) * 2)
         score += rsi_score * cls.TECH_WEIGHTS['rsi']
 
-        # MACD趋势 (0-100)
+        # ========== MACD趋势 (0-100) ==========
         macd_hist = tech_info.get('macd_hist', 0)
         macd_golden_days = tech_info.get('macd_golden_cross_days', 0)
-        if macd_golden_days == 0:
-            macd_score = 50 if macd_hist < 0 else 70
+        macd_dead_days = tech_info.get('macd_dead_cross_days', 0)
+
+        if macd_golden_days == 0 and macd_dead_days == 0:
+            # 无交叉，根据hist方向判断
+            if macd_hist > 0:
+                macd_score = 70 if macd_hist > 0.5 else 60
+            else:
+                macd_score = 50 if macd_hist > -0.5 else 40
+        elif macd_golden_days > 0 and macd_golden_days <= 5:
+            # 刚金叉，越近越高
+            macd_score = min(100, 75 + (6 - macd_golden_days) * 5)
+        elif macd_dead_days > 0 and macd_dead_days <= 3:
+            # 刚死叉，大幅扣分
+            macd_score = max(20, 50 - macd_dead_days * 10)
         else:
-            macd_score = min(100, 60 + (7 - macd_golden_days) * 7)
+            macd_score = 50
         score += macd_score * cls.TECH_WEIGHTS['macd']
 
-        # KDJ指标 (0-100)
+        # ========== KDJ指标 (0-100) ==========
         kdj_k = tech_info.get('kdj_k', 50)
         kdj_d = tech_info.get('kdj_d', 50)
+        kdj_j = tech_info.get('kdj_j', 50)
         kdj_golden_days = tech_info.get('kdj_golden_cross_days', 0)
         kdj_overbought = tech_info.get('kdj_overbought', False)
         kdj_oversold = tech_info.get('kdj_oversold', False)
 
-        if kdj_oversold:
-            # 超卖区域，金叉即将形成，给较高分数
-            kdj_score = 75
+        if kdj_oversold and market_env == 'BEAR':
+            # 熊市超卖可能是买入机会
+            kdj_score = 70
+        elif kdj_overbought and market_env == 'BULL':
+            # 牛市超买可能是持有信号
+            kdj_score = 65
         elif kdj_overbought:
-            # 超买区域，给较低分数
-            kdj_score = 40
-        elif kdj_golden_days > 0 and kdj_golden_days <= 5:
-            # 刚金叉
-            kdj_score = min(100, 70 + (6 - kdj_golden_days) * 6)
+            kdj_score = 35
+        elif kdj_oversold:
+            kdj_score = 70
+        elif kdj_golden_days > 0 and kdj_golden_days <= 3:
+            # 刚金叉，K和D都在上升
+            kdj_score = min(100, 78 + (4 - kdj_golden_days) * 5)
+        elif kdj_k > kdj_d and kdj_j > 80:
+            # KDJ高位钝化
+            kdj_score = 45
         else:
             # 正常区域
-            kdj_score = 50 + (kdj_k - 50) * 0.3
+            kdj_score = 50 + (kdj_k - 50) * 0.2
         score += kdj_score * cls.TECH_WEIGHTS['kdj']
 
-        # 均线多头排列 (0或100)
-        ma_score = 100 if tech_info.get('ma_alignment') else 40
+        # ========== 均线多头排列 (0或100) ==========
+        if tech_info.get('ma_alignment'):
+            # 牛市均线多头更强，熊市打折扣
+            ma_score = 100 if market_env == 'BULL' else 85
+        elif tech_info.get('ma_bearish'):
+            ma_score = 20
+        else:
+            ma_score = 45
         score += ma_score * cls.TECH_WEIGHTS['ma_alignment']
 
-        # 布林带位置 (0-100)
+        # ========== 布林带位置 (0-100) ==========
         boll_support = tech_info.get('boll_mid_support', False)
         price = tech_info.get('current_price', 0)
         boll_mid = tech_info.get('boll_mid', 0)
         boll_upper = tech_info.get('boll_upper', 0)
         boll_lower = tech_info.get('boll_lower', 0)
 
-        if boll_upper > boll_lower:
+        if boll_upper > boll_lower and boll_lower > 0:
             boll_position = (price - boll_lower) / (boll_upper - boll_lower) * 100
-            if boll_support:
-                boll_score = min(100, 60 + boll_position * 0.4)
+
+            if boll_position < 20:
+                # 布林下轨附近，强支撑
+                boll_score = 85 if boll_support else 70
+            elif boll_position > 85:
+                # 布林上轨，压力区
+                boll_score = 40
+            elif boll_support:
+                # 中轨上方且获得支撑
+                boll_score = min(100, 60 + (100 - boll_position) * 0.4)
             else:
-                boll_score = max(0, boll_position - 40)
+                boll_score = max(20, 55 - abs(50 - boll_position) * 0.6)
         else:
             boll_score = 50
         score += boll_score * cls.TECH_WEIGHTS['boll_position']
 
-        # 量价配合 (0-100)
+        # ========== 量价配合 (0-100) ==========
         vol_price_score = tech_info.get('vol_price_score', 0)
-        vol_price_normalized = (vol_price_score + 20) / 40 * 100  # 归一化到0-100
+        # 归一化到0-100
+        vol_price_normalized = (vol_price_score + 20) / 40 * 100
         vol_price_normalized = min(100, max(0, vol_price_normalized))
+
+        # 量价背离是大风险信号
+        if vol_price_score < -15:
+            vol_price_normalized *= 0.5
+        elif vol_price_score > 15:
+            vol_price_normalized = min(100, vol_price_normalized * 1.2)  # 量增价涨加分
+
         score += vol_price_normalized * cls.TECH_WEIGHTS['vol_price']
 
-        # 量比 (0-100)
+        # ========== 量比 (0-100) ==========
         volume_ratio = tech_info.get('volume_ratio', 1)
-        if volume_ratio >= 1.5:
-            vol_score = min(100, 60 + (volume_ratio - 1.5) * 20)
-        elif volume_ratio >= 1:
-            vol_score = 60 + (volume_ratio - 1) * 40
+        if volume_ratio >= 2.0:
+            vol_score = min(100, 70 + (volume_ratio - 2.0) * 15)
+        elif volume_ratio >= 1.5:
+            vol_score = 60 + (volume_ratio - 1.5) * 40
+        elif volume_ratio >= 1.0:
+            vol_score = 50 + (volume_ratio - 1.0) * 20
         else:
-            vol_score = max(20, volume_ratio * 60)
+            vol_score = max(15, volume_ratio * 50)
         score += vol_score * cls.TECH_WEIGHTS['volume_ratio']
+
+        # ========== 指标共振加成 ==========
+        resonance_bonus = cls.calculate_resonance_bonus(tech_info)
+        score = min(100, max(0, score + resonance_bonus))
 
         return min(100, max(0, score))
 
     @classmethod
-    def calculate_fund_score(cls, fund_info: Dict) -> float:
-        """计算资金面得分 (0-100)"""
+    def calculate_fund_score(cls, fund_info: Dict, market_env: str = None) -> float:
+        """
+        计算资金面得分 (0-100)
+        优化版：连续性权重提高，增加流入动量
+        """
         if not fund_info or not fund_info.get('data_valid'):
             return 50
 
+        if market_env is None:
+            market_env = cls.detect_market_environment()
+
         score = 0
 
-        # 主力净流入占比 (0-100)
+        # ========== 主力净流入占比 (0-100) ==========
         main_ratio = fund_info.get('main_ratio', 0)
-        main_ratio_score = min(100, main_ratio * 3)  # 30%以上给满分
+        # 动态阈值：熊市对主力占比要求更高
+        if market_env == 'BEAR':
+            main_ratio_score = min(100, main_ratio * 4)  # 25%以上满分
+        else:
+            main_ratio_score = min(100, main_ratio * 3)  # 33%以上满分
         score += main_ratio_score * cls.FUND_WEIGHTS['main_ratio']
 
-        # 连续净流入天数 (0-100)
+        # ========== 连续净流入天数 (0-100) - 权重最高 ==========
         consecutive_days = fund_info.get('consecutive_days', 0)
-        consecutive_score = min(100, consecutive_days * 15)  # 7天以上给满分
+        # 使用指数增长模型：天数越多加分加速
+        if consecutive_days >= 10:
+            consecutive_score = 100
+        elif consecutive_days >= 5:
+            consecutive_score = 70 + (consecutive_days - 5) * 6
+        else:
+            consecutive_score = consecutive_days * 14
         score += consecutive_score * cls.FUND_WEIGHTS['consecutive_days']
 
-        # 超大单净流入 (0或100)
+        # ========== 超大单净流入 (0-100) ==========
         super_inflow = fund_info.get('super_inflow', 0)
-        super_score = 100 if super_inflow > 0 else 30
+        if super_inflow > 100000000:  # 超过1亿
+            super_score = 100
+        elif super_inflow > 50000000:  # 超过5000万
+            super_score = 80
+        elif super_inflow > 0:
+            super_score = 60 + (super_inflow / 50000000) * 20
+        else:
+            super_score = 25  # 净流出给较低分
         score += super_score * cls.FUND_WEIGHTS['super_inflow']
 
-        # 北向资金 (0或100)
+        # ========== 北向资金 (0-100) ==========
         north = fund_info.get('north_bound', False)
-        north_score = 100 if north else 50
+        if market_env == 'BULL':
+            # 牛市北向资金加分更多
+            north_score = 100 if north else 45
+        else:
+            north_score = 85 if north else 50
         score += north_score * cls.FUND_WEIGHTS['north_bound']
+
+        # ========== 流入动量 (0-100) - 新增 ==========
+        # 近3天vs近5天的流入对比，流入加速加分
+        recent_momentum = fund_info.get('recent_momentum', 0)
+        if recent_momentum > 0.2:  # 流入加速超过20%
+            momentum_score = min(100, 70 + recent_momentum * 100)
+        elif recent_momentum > 0:
+            momentum_score = 50 + recent_momentum * 100
+        elif recent_momentum < -0.2:  # 流入放缓
+            momentum_score = max(20, 50 + recent_momentum * 100)
+        else:
+            momentum_score = 50
+        score += momentum_score * cls.FUND_WEIGHTS.get('inflow_momentum', 0.08)
 
         return min(100, max(0, score))
 
     @classmethod
-    def calculate_fundamental_score(cls, stock_data: Dict, fundamental_params: Dict = None) -> float:
-        """计算基本面得分 (0-100)"""
+    def calculate_fundamental_score(cls, stock_data: Dict, fundamental_params: Dict = None,
+                                   market_env: str = None) -> float:
+        """
+        计算基本面得分 (0-100)
+        优化版：成长性权重提高，动态阈值
+        """
         if not stock_data:
             return 50
+
+        if market_env is None:
+            market_env = cls.detect_market_environment()
 
         params = fundamental_params or {}
         score = 0
 
-        # ROE (0-100)
+        # ========== ROE (0-100) ==========
         roe = stock_data.get('roe', stock_data.get('净资产收益率', 0))
         try:
             roe = float(roe) if roe not in ['N/A', None, ''] else 0
         except:
             roe = 0
         roe_min = params.get('roe_min', 8)
-        if roe >= roe_min:
-            roe_score = min(100, 60 + (roe - roe_min) * 4)
+
+        # 动态ROE阈值
+        if market_env == 'BULL':
+            # 牛市对ROE要求稍低
+            roe_threshold = roe_min * 0.9
         else:
-            roe_score = max(0, (roe / roe_min) * 60) if roe_min > 0 else 0
+            roe_threshold = roe_min
+
+        if roe >= roe_threshold:
+            # ROE越高加分越多，但有边际递减
+            excess = roe - roe_threshold
+            if excess > 15:
+                roe_score = min(100, 85 + (excess - 15) * 0.5)
+            else:
+                roe_score = min(100, 60 + excess * 1.5)
+        else:
+            # ROE低于阈值，大幅扣分
+            if roe > 0:
+                roe_score = max(0, (roe / roe_threshold) * 50)
+            else:
+                roe_score = 10  # 亏损股票给极低分
         score += roe_score * cls.FUNDAMENTAL_WEIGHTS['roe']
 
-        # 净利润增长 (0-100)
+        # ========== 净利润增长 (0-100) - 权重最高 ==========
         profit_growth = stock_data.get('profit_growth', stock_data.get('净利润同比增长', 0))
         try:
             profit_growth = float(profit_growth) if profit_growth not in ['N/A', None, ''] else 0
         except:
             profit_growth = 0
         profit_growth_min = params.get('profit_growth_min', 0)
-        if profit_growth >= profit_growth_min:
-            growth_score = min(100, 50 + profit_growth * 2)
+
+        # 高增长加分更多，使用指数模型
+        if profit_growth >= 100:
+            # 业绩暴增
+            growth_score = min(100, 90 + (profit_growth - 100) * 0.05)
+        elif profit_growth >= profit_growth_min:
+            growth_score = min(100, 50 + (profit_growth - profit_growth_min) * 2)
+        elif profit_growth > 0:
+            # 正增长但低于阈值
+            growth_score = 30 + (profit_growth / profit_growth_min) * 20 if profit_growth_min > 0 else 40
         else:
-            growth_score = max(0, 30 + (profit_growth - profit_growth_min) * 2)
+            # 负增长
+            if profit_growth > -20:
+                growth_score = max(15, 30 + profit_growth)
+            else:
+                growth_score = 10
         score += growth_score * cls.FUNDAMENTAL_WEIGHTS['profit_growth']
 
-        # PEG (0-100，越低越好)
+        # ========== PEG (0-100，越低越好) ==========
         peg = stock_data.get('peg', 0)
         try:
             if isinstance(peg, str):
@@ -1129,101 +1624,269 @@ class MultiDimensionScorer:
         except:
             peg = 2
         peg_max = params.get('peg_max', 2)
-        if peg <= peg_max:
-            peg_score = min(100, (peg_max - peg + 0.5) * 40)
+
+        if peg <= 0.5:
+            # PEG极低，价值陷阱风险
+            peg_score = 60
+        elif peg <= peg_max:
+            peg_score = min(100, (peg_max - peg + 0.5) * 50)
+        elif peg <= 3:
+            peg_score = max(20, 50 - (peg - peg_max) * 15)
         else:
-            peg_score = max(0, 50 - (peg - peg_max) * 10)
+            # PEG过高
+            peg_score = max(10, 30 - (peg - 3) * 5)
         score += peg_score * cls.FUNDAMENTAL_WEIGHTS['peg']
 
-        # 股息率 (0-100)
+        # ========== 股息率 (0-100) ==========
         dividend = stock_data.get('dividend', stock_data.get('股息率', 0))
         try:
             dividend = float(dividend) if dividend not in ['N/A', None, ''] else 0
         except:
             dividend = 0
         dividend_min = params.get('dividend_min', 1)
+
         if dividend >= dividend_min:
-            div_score = min(100, 60 + dividend * 8)
+            div_score = min(100, 60 + dividend * 10)
         else:
             div_score = max(0, (dividend / dividend_min) * 60) if dividend_min > 0 else 0
         score += div_score * cls.FUNDAMENTAL_WEIGHTS['dividend']
 
-        # 资产负债率 (0-100，越低越好)
+        # ========== 资产负债率 (0-100，越低越好) ==========
         debt_ratio = stock_data.get('debt_ratio', stock_data.get('资产负债率', 0))
         try:
             debt_ratio = float(debt_ratio) if debt_ratio not in ['N/A', None, ''] else 50
         except:
             debt_ratio = 50
         debt_max = params.get('debt_ratio_max', 65)
-        if debt_ratio <= debt_max:
-            debt_score = min(100, 60 + (debt_max - debt_ratio) * 2)
+
+        if debt_ratio <= 30:
+            # 资产负债率极低，财务稳健
+            debt_score = 90
+        elif debt_ratio <= debt_max:
+            debt_score = min(100, 60 + (debt_max - debt_ratio) * 1.5)
+        elif debt_ratio <= 80:
+            debt_score = max(20, 50 - (debt_ratio - debt_max) * 1.5)
         else:
-            debt_score = max(0, 50 - (debt_ratio - debt_max))
+            # 资产负债率过高
+            debt_score = max(10, 30 - (debt_ratio - 80))
         score += debt_score * cls.FUNDAMENTAL_WEIGHTS['debt_ratio']
 
         return min(100, max(0, score))
 
     @classmethod
-    def calculate_trend_score(cls, tech_info: Dict, trend_params: Dict = None) -> float:
-        """计算趋势面得分 (0-100)"""
+    def calculate_trend_score(cls, tech_info: Dict, trend_params: Dict = None,
+                            market_env: str = None) -> float:
+        """
+        计算趋势面得分 (0-100)
+        优化版：年线位置权重提高，增加多周期动量对齐
+        """
         if not tech_info:
             return 50
 
+        if market_env is None:
+            market_env = cls.detect_market_environment()
+
         params = trend_params or {}
         score = 0
+        env = cls.MARKET_ENVIRONMENT.get(market_env, cls.MARKET_ENVIRONMENT['NEUTRAL'])
 
-        # 振幅得分 (0-100)
+        # ========== 振幅得分 (0-100) ==========
         amplitude = tech_info.get('amplitude', 10)
         amp_min = params.get('amplitude_min', 5)
         amp_max = params.get('amplitude_max', 35)
-        if amp_min <= amplitude <= amp_max:
+
+        # 根据市场环境调整振幅预期
+        effective_amp_max = amp_max * env.get('amplitude_boost', 1.0)
+
+        if amp_min <= amplitude <= effective_amp_max:
             amp_score = 100
         elif amplitude < amp_min:
-            amp_score = max(0, amplitude / amp_min * 80)
+            # 振幅过低，可能横盘
+            amp_score = max(0, amplitude / amp_min * 75)
         else:
-            amp_score = max(0, 100 - (amplitude - amp_max) * 3)
+            # 振幅过大，波动风险
+            amp_score = max(0, 100 - (amplitude - effective_amp_max) * 4)
         score += amp_score * cls.TREND_WEIGHTS['amplitude']
 
-        # 年线位置 (0-100)
-        year_ma = params.get('above_year_ma', False)
+        # ========== 年线位置 (0-100) - 权重最高 ==========
         price = tech_info.get('current_price', 0)
         ma60 = tech_info.get('ma60', 0)
-        if year_ma and ma60 > 0:
-            year_ma_score = 100 if price > ma60 else 40
+        ma20 = tech_info.get('ma20', 0)
+        ma10 = tech_info.get('ma10', 0)
+        ma5 = tech_info.get('ma5', 0)
+
+        above_year_ma = params.get('above_year_ma', False)
+
+        if ma60 > 0 and price > 0:
+            year_ma_ratio = price / ma60  # 站上年线的比例
+            if year_ma_ratio > 1.2:
+                # 涨幅过大，超过年线20%
+                year_ma_score = 70 if market_env == 'BULL' else 50
+            elif year_ma_ratio > 1.1:
+                year_ma_score = 90
+            elif year_ma_ratio > 1.05:
+                year_ma_score = 85
+            elif year_ma_ratio > 1.0:
+                year_ma_score = 80
+            elif year_ma_ratio > 0.95:
+                year_ma_score = 60
+            else:
+                year_ma_score = 35  # 在年线下方
+
+            # 趋势角度：年线是否向上
+            if above_year_ma:
+                year_ma_score = min(100, year_ma_score + 10)
         else:
-            year_ma_score = 70  # 不要求时给中等分数
+            year_ma_score = 50
+
+        # 熊市中年线位置更重要
+        if market_env == 'BEAR':
+            year_ma_score *= 1.15
         score += year_ma_score * cls.TREND_WEIGHTS['year_ma']
 
-        # 筹码集中 (0-100)
+        # ========== 筹码集中 (0-100) ==========
         chip = params.get('chip_concentration', False)
-        chip_score = 100 if chip else 50  # 简化处理
+        # 简化处理，根据量价关系推断
+        vol_price_score = tech_info.get('vol_price_score', 0)
+        volume_ratio = tech_info.get('volume_ratio', 1)
+
+        if vol_price_score > 10 and volume_ratio > 1.3:
+            # 量增价涨，筹码可能正在集中
+            if chip:
+                chip_score = 90
+            else:
+                chip_score = 70
+        elif vol_price_score < -10 and volume_ratio > 1.3:
+            # 量增价跌，可能在派发
+            chip_score = 30 if chip else 40
+        else:
+            chip_score = 50 if chip else 50
         score += chip_score * cls.TREND_WEIGHTS['chip']
+
+        # ========== 多周期动量对齐 (0-100) - 新增 ==========
+        momentum_alignment = 0
+        ma_scores = []
+
+        if ma5 > ma10:
+            ma_scores.append(1)
+        elif ma5 < ma10:
+            ma_scores.append(-1)
+
+        if ma10 > ma20:
+            ma_scores.append(1)
+        elif ma10 < ma20:
+            ma_scores.append(-1)
+
+        if ma20 > ma60:
+            ma_scores.append(1)
+        elif ma20 < ma60:
+            ma_scores.append(-1)
+
+        if ma_scores:
+            # 多数周期向上
+            positive_count = sum(1 for s in ma_scores if s > 0)
+            momentum_alignment = (positive_count / len(ma_scores)) * 100
+
+        score += momentum_alignment * cls.TREND_WEIGHTS.get('momentum_alignment', 0.15)
 
         return min(100, max(0, score))
 
     @classmethod
     def calculate_wencai_score(cls, stock_data: Dict) -> float:
-        """计算问财评分得分 (0-100)"""
+        """
+        计算问财评分得分 (0-100)
+        优化版：使用加权平均，盈利能力权重更高
+        """
         if not stock_data:
             return 50
 
-        scores = []
-        score_cols = ['盈利能力评分', '成长能力评分', '营运能力评分', '偿债能力评分',
-                      '现金流评分', '资产质量评分', '流动性评分', '资本充足性评分']
+        # 各项评分的推荐权重
+        score_weights = {
+            '盈利能力评分': 0.20,      # 最重要
+            '成长能力评分': 0.18,
+            '营运能力评分': 0.12,
+            '偿债能力评分': 0.12,
+            '现金流评分': 0.15,
+            '资产质量评分': 0.08,
+            '流动性评分': 0.07,
+            '资本充足性评分': 0.08
+        }
 
-        for col in score_cols:
+        total_weight = 0
+        weighted_sum = 0
+
+        for col, weight in score_weights.items():
             value = stock_data.get(col, stock_data.get('scores', {}).get(col))
             if value not in ['N/A', None, '', 0]:
                 try:
                     score = float(value)
                     if 0 <= score <= 100:
-                        scores.append(score)
+                        weighted_sum += score * weight
+                        total_weight += weight
                 except:
                     pass
 
-        if scores:
-            return sum(scores) / len(scores)
+        if total_weight > 0:
+            return weighted_sum / total_weight
         return 50
+
+    @classmethod
+    def calculate_momentum_score(cls, stock_data: Dict, tech_info: Dict = None,
+                               market_env: str = None) -> float:
+        """
+        计算动量得分 (0-100)
+        优化版：近期表现权重更高，使用指数加权
+        """
+        if market_env is None:
+            market_env = cls.detect_market_environment()
+
+        env = cls.MARKET_ENVIRONMENT.get(market_env, cls.MARKET_ENVIRONMENT['NEUTRAL'])
+
+        # 从问财数据获取涨跌幅
+        change = 0
+        for key in ['区间涨跌幅', '涨跌幅', '区间涨跌幅(%)', '涨跌幅(%)']:
+            if key in stock_data:
+                try:
+                    change = float(stock_data[key])
+                    break
+                except:
+                    pass
+
+        # 获取技术指标中的动量信息
+        momentum_score = 50
+        if tech_info:
+            # 近5天量价表现
+            vol_price_score = tech_info.get('vol_price_score', 0)
+            volume_ratio = tech_info.get('volume_ratio', 1)
+
+            # 合成动量信号
+            if vol_price_score > 15 and volume_ratio > 1.5:
+                momentum_score = 80
+            elif vol_price_score > 10 and volume_ratio > 1.2:
+                momentum_score = 70
+            elif vol_price_score > 5:
+                momentum_score = 60
+            elif vol_price_score < -15:
+                momentum_score = 30
+            elif vol_price_score < -10:
+                momentum_score = 40
+
+        # 根据涨跌幅调整
+        if change > 20:
+            change_factor = 1.3  # 牛市加分更多
+        elif change > 10:
+            change_factor = 1.2
+        elif change > 5:
+            change_factor = 1.1
+        elif change > 0:
+            change_factor = 1.0
+        else:
+            change_factor = 0.9
+
+        # 应用市场环境和涨跌幅因子
+        momentum_score *= change_factor * env.get('momentum_boost', 1.0)
+
+        return min(100, max(0, momentum_score))
 
     @classmethod
     def calculate_total_score(cls, stock_data: Dict, tech_info: Dict = None,
@@ -1232,34 +1895,64 @@ class MultiDimensionScorer:
                             trend_params: Dict = None) -> Dict:
         """
         计算股票综合评分
+        优化版：市场环境感知 + 指标共振 + 动量因子 + 风控联动
 
         Returns:
             包含各维度得分和总分的字典
         """
+        # 检测市场环境
+        market_env = cls.detect_market_environment()
         weights = cls.get_weights(strategy)
 
-        # 各维度得分
-        tech_score = cls.calculate_technical_score(tech_info) if tech_info else 50
-        fund_score = cls.calculate_fund_score(fund_info) if fund_info else 50
-        fundamental_score = cls.calculate_fundamental_score(stock_data, fundamental_params)
-        trend_score = cls.calculate_trend_score(tech_info, trend_params)
+        # 各维度得分（传入市场环境）
+        tech_score = cls.calculate_technical_score(tech_info, market_env) if tech_info else 50
+        fund_score = cls.calculate_fund_score(fund_info, market_env) if fund_info else 50
+        fundamental_score = cls.calculate_fundamental_score(stock_data, fundamental_params, market_env)
+        trend_score = cls.calculate_trend_score(tech_info, trend_params, market_env)
         industry_score = IndustryRelativeStrength.calculate_industry_score(stock_data, tech_info)
         wencai_score = cls.calculate_wencai_score(stock_data)
+        momentum_score = cls.calculate_momentum_score(stock_data, tech_info, market_env)
 
         # 风控评分（风险越高分数越低）
         risk_report = RiskControlManager.generate_risk_report(stock_data, tech_info, fund_info)
         risk_score = risk_report.get('risk_assessment', {}).get('risk_score', 50)
 
-        # 加权总分
+        # ========== 动态权重调整 ==========
+        # 根据市场环境动态调整各维度权重
+        adjusted_weights = weights.copy()
+
+        if market_env == 'BULL':
+            # 牛市：提高动量因子，降低风控权重
+            adjusted_weights['momentum'] = weights.get('momentum', 0.10) * 1.2
+            adjusted_weights['risk'] = weights.get('risk', 0.10) * 0.9
+            adjusted_weights['tech'] = weights.get('tech', 0.15) * 1.1
+        elif market_env == 'BEAR':
+            # 熊市：提高风控，降低动量
+            adjusted_weights['momentum'] = weights.get('momentum', 0.10) * 0.8
+            adjusted_weights['risk'] = weights.get('risk', 0.10) * 1.3
+            adjusted_weights['fund'] = weights.get('fund', 0.20) * 1.1
+        # NEUTRAL: 不调整
+
+        # ========== 计算加权总分 ==========
         total_score = (
-            tech_score * weights.get('tech', 0.20) +
-            fund_score * weights.get('fund', 0.25) +
-            fundamental_score * weights.get('fundamental', 0.25) +
-            trend_score * weights.get('trend', 0.10) +
-            industry_score * weights.get('industry', 0.10) +
-            wencai_score * weights.get('wencai', 0.10) +
-            risk_score * weights.get('risk', 0.10)
+            tech_score * adjusted_weights.get('tech', 0.15) +
+            fund_score * adjusted_weights.get('fund', 0.18) +
+            fundamental_score * adjusted_weights.get('fundamental', 0.18) +
+            trend_score * adjusted_weights.get('trend', 0.12) +
+            industry_score * adjusted_weights.get('industry', 0.10) +
+            momentum_score * adjusted_weights.get('momentum', 0.10) +
+            risk_score * adjusted_weights.get('risk', 0.17)
         )
+
+        # ========== 风控联动：风险过高时降低总分上限 ==========
+        risk_assessment = risk_report.get('risk_assessment', {})
+        risk_level = risk_assessment.get('risk_level', 'medium')
+
+        # 极高风险股票，总分上限降低
+        if risk_level == 'very_high':
+            total_score = total_score * 0.7  # 上限降低30%
+        elif risk_level == 'high':
+            total_score = total_score * 0.85  # 上限降低15%
 
         return {
             'total_score': round(total_score, 2),
@@ -1268,9 +1961,11 @@ class MultiDimensionScorer:
             'fundamental_score': round(fundamental_score, 2),
             'trend_score': round(trend_score, 2),
             'industry_score': round(industry_score, 2),
+            'momentum_score': round(momentum_score, 2),
             'wencai_score': round(wencai_score, 2),
             'risk_score': round(risk_score, 2),
-            'weights': weights,
+            'weights': adjusted_weights,
+            'market_environment': market_env,
             'risk_report': risk_report
         }
 
@@ -1302,11 +1997,17 @@ class MultiDimensionScorer:
         print(f"\n{'='*60}")
         print(f"📊 多维度评分加权排序中...")
         print(f"{'='*60}")
+
+        # 检测并显示市场环境
+        market_env = cls.detect_market_environment()
+        env_names = {'BULL': '牛市', 'BEAR': '熊市', 'NEUTRAL': '震荡市'}
+        print(f"市场环境: {env_names.get(market_env, '未知')}")
+
         print(f"策略类型: {strategy}")
         weights = cls.get_weights(strategy)
         print(f"权重配置: 技术面{weights.get('tech',0)*100:.0f}% | 资金面{weights.get('fund',0)*100:.0f}% | "
               f"基本面{weights.get('fundamental',0)*100:.0f}% | 趋势面{weights.get('trend',0)*100:.0f}% | "
-              f"行业{weights.get('industry',0)*100:.0f}% | 风控{weights.get('risk',0)*100:.0f}%")
+              f"动量{weights.get('momentum',0)*100:.0f}% | 风控{weights.get('risk',0)*100:.0f}%")
 
         scored_stocks = []
 
@@ -1337,7 +2038,10 @@ class MultiDimensionScorer:
             scored_row['资金面评分'] = scores['fund_score']
             scored_row['基本面评分'] = scores['fundamental_score']
             scored_row['趋势面评分'] = scores['trend_score']
+            scored_row['动量评分'] = scores['momentum_score']
             scored_row['问财评分'] = scores['wencai_score']
+            scored_row['风控评分'] = scores['risk_score']
+            scored_row['市场环境'] = scores['market_environment']
             scored_row['评分明细'] = scores
 
             scored_stocks.append(scored_row)
@@ -1358,10 +2062,13 @@ class MultiDimensionScorer:
         print(f"\n  评分完成，共 {len(result_df)} 只股票")
         print(f"  评分前5名:")
         for i, (_, row) in enumerate(result_df.head(5).iterrows(), 1):
-            print(f"    {i}. {row.get('股票代码', 'N/A')} {row.get('股票简称', 'N/A')} - "
-                  f"综合评分:{row['综合评分']:.1f} "
+            env_tag = {'BULL': '(牛)', 'BEAR': '(熊)', 'NEUTRAL': '(震)'}
+            tag = env_tag.get(row.get('市场环境', ''), '')
+            print(f"    {i}. {row.get('股票代码', 'N/A')} {row.get('股票简称', 'N/A')} {tag} - "
+                  f"综合:{row['综合评分']:.1f} "
                   f"(技:{row['技术面评分']:.1f} 资:{row['资金面评分']:.1f} "
-                  f"基:{row['基本面评分']:.1f} 趋:{row['趋势面评分']:.1f})")
+                  f"基:{row['基本面评分']:.1f} 趋:{row['趋势面评分']:.1f} "
+                  f"动:{row['动量评分']:.1f} 风:{row['风控评分']:.1f})")
 
         return result_df
 
