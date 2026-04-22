@@ -1,6 +1,12 @@
 # 🤖 复合多AI智能体股票团队分析系统
 
 - 初心：在股市摸爬滚打多年，自学自编各种指标，花冤柉钱学习了各种战法各种策略，也曾入各种小班，总是赚少赔多，逐渐失去在股市玩的信心。自从去年deepseek上市，一直探索用ai辅助分析，且近日受tradingagents项目启发（感谢原作），多agent结合跟踪主力资金战法（某指每年收费6000rmb），用各种ai辅助编程，拼凑了这么个小程序，根据软件提供的辅助信息，实盘测试盈率还是挺高的，并且逐步形成了自己的交易系统，近一个月来，账户也慢慢在扰亏为盈。开源此软件的目的，就是为了使像我一样的小散，不再迷范。也许这个软件不能让你发大财，但是他能给你足够的信心。最后提醒：股市有风险，入市需谨慎！
+
+## 项目致谢
+
+本项目受以下开源项目启发：
+- **Hikyuu量化框架**：https://github.com/fasiondog/hikyuu | 作者：fasiondog
+- **TradingAgents项目**：https://github.com/oficcejo/aiagents-stock | 作者：oficcejo
 ## QQ交流群：1059277514  微信交流群2：<img width="505" height="529" alt="image" src="https://github.com/user-attachments/assets/3f109f9c-4334-4ec0-9c05-34ae84272789" />
 
 
@@ -715,6 +721,21 @@ streamlit run app.py
 
 ### 5. 访问系统
 打开浏览器访问：http://localhost:8501
+
+### 6. 安装Hikyuu量化框架（可选，用于本地财务数据）
+Hikyuu是本地量化框架，可以提供更丰富的财务数据。如需安装：
+```bash
+# 进入backend目录
+cd hikyuu
+
+# 安装编译工具xmake（如未安装）
+pip install xmake
+
+# 编译并安装
+python setup.py install
+
+# Windows下可能还需要安装Visual Studio Build Tools
+```
 
 ---
 
