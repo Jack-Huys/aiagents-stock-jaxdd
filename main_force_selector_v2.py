@@ -864,7 +864,7 @@ class MainForceStockSelectorV2:
             # 应用筛选条件
             rsi_min = params.get('rsi_min', 30)
             rsi_max = params.get('rsi_max', 80)
-            rsi = tech_info.get('rsi6', 50)
+            rsi = tech_info.get('rsi6') or 50
 
             # RSI筛选
             if not (rsi_min <= rsi <= rsi_max):
@@ -873,7 +873,7 @@ class MainForceStockSelectorV2:
             # MACD金叉筛选
             if params.get('macd_golden_cross', False):
                 golden_days = params.get('macd_golden_cross_days', 5)
-                if tech_info.get('macd_golden_cross_days', 0) > golden_days:
+                if (tech_info.get('macd_golden_cross_days') or 0) > golden_days:
                     continue
 
             # 均线多头排列
@@ -894,7 +894,7 @@ class MainForceStockSelectorV2:
             # 振幅筛选
             amplitude_min = params.get('amplitude_min', 0)
             amplitude_max = params.get('amplitude_max', 100)
-            amplitude = tech_info.get('amplitude', 50)
+            amplitude = tech_info.get('amplitude') or 50
             if not (amplitude_min <= amplitude <= amplitude_max):
                 continue
 
@@ -1295,11 +1295,11 @@ class MultiDimensionScorer:
         signals = set()
 
         # 收集看涨信号
-        if tech_info.get('macd_golden_cross_days', 0) <= 5:
+        if (tech_info.get('macd_golden_cross_days') or 0) <= 5:
             signals.add('macd_golden')
-        if tech_info.get('macd_dead_cross_days', 0) <= 5:
+        if (tech_info.get('macd_dead_cross_days') or 0) <= 5:
             signals.add('macd_dead')
-        if tech_info.get('kdj_golden_cross_days', 0) <= 5:
+        if (tech_info.get('kdj_golden_cross_days') or 0) <= 5:
             signals.add('kdj_golden')
         if tech_info.get('kdj_overbought'):
             signals.add('kdj_overbought')
@@ -1311,11 +1311,12 @@ class MultiDimensionScorer:
             signals.add('ma_bearish')
         if tech_info.get('boll_mid_support'):
             signals.add('boll_support')
-        if tech_info.get('vol_price_score', 0) > 10:
+        if (tech_info.get('vol_price_score') or 0) > 10:
             signals.add('vol_price_good')
-        if tech_info.get('volume_ratio', 1) > 1.5:
+        if (tech_info.get('volume_ratio') or 1) > 1.5:
             signals.add('vol_breakout')
-        if 30 <= tech_info.get('rsi6', 50) <= 70:
+        rsi_val = tech_info.get('rsi6') or 50
+        if 30 <= rsi_val <= 70:
             signals.add('rsi_healthy')
 
         # 检查共振加成
@@ -1352,7 +1353,7 @@ class MultiDimensionScorer:
         score = 0
 
         # ========== RSI健康度 (0-100) ==========
-        rsi = tech_info.get('rsi6', 50)
+        rsi = tech_info.get('rsi6') or 50
         rsi_min = env['rsi_optimal_min']
         rsi_max = env['rsi_optimal_max']
 
@@ -1368,9 +1369,9 @@ class MultiDimensionScorer:
         score += rsi_score * cls.TECH_WEIGHTS['rsi']
 
         # ========== MACD趋势 (0-100) ==========
-        macd_hist = tech_info.get('macd_hist', 0)
-        macd_golden_days = tech_info.get('macd_golden_cross_days', 0)
-        macd_dead_days = tech_info.get('macd_dead_cross_days', 0)
+        macd_hist = tech_info.get('macd_hist') or 0
+        macd_golden_days = tech_info.get('macd_golden_cross_days') or 0
+        macd_dead_days = tech_info.get('macd_dead_cross_days') or 0
 
         if macd_golden_days == 0 and macd_dead_days == 0:
             # 无交叉，根据hist方向判断
@@ -1389,10 +1390,10 @@ class MultiDimensionScorer:
         score += macd_score * cls.TECH_WEIGHTS['macd']
 
         # ========== KDJ指标 (0-100) ==========
-        kdj_k = tech_info.get('kdj_k', 50)
-        kdj_d = tech_info.get('kdj_d', 50)
-        kdj_j = tech_info.get('kdj_j', 50)
-        kdj_golden_days = tech_info.get('kdj_golden_cross_days', 0)
+        kdj_k = tech_info.get('kdj_k') or 50
+        kdj_d = tech_info.get('kdj_d') or 50
+        kdj_j = tech_info.get('kdj_j') or 50
+        kdj_golden_days = tech_info.get('kdj_golden_cross_days') or 0
         kdj_overbought = tech_info.get('kdj_overbought', False)
         kdj_oversold = tech_info.get('kdj_oversold', False)
 
@@ -1429,10 +1430,10 @@ class MultiDimensionScorer:
 
         # ========== 布林带位置 (0-100) ==========
         boll_support = tech_info.get('boll_mid_support', False)
-        price = tech_info.get('current_price', 0)
-        boll_mid = tech_info.get('boll_mid', 0)
-        boll_upper = tech_info.get('boll_upper', 0)
-        boll_lower = tech_info.get('boll_lower', 0)
+        price = tech_info.get('current_price') or 0
+        boll_mid = tech_info.get('boll_mid') or 0
+        boll_upper = tech_info.get('boll_upper') or 0
+        boll_lower = tech_info.get('boll_lower') or 0
 
         if boll_upper > boll_lower and boll_lower > 0:
             boll_position = (price - boll_lower) / (boll_upper - boll_lower) * 100
@@ -1453,7 +1454,7 @@ class MultiDimensionScorer:
         score += boll_score * cls.TECH_WEIGHTS['boll_position']
 
         # ========== 量价配合 (0-100) ==========
-        vol_price_score = tech_info.get('vol_price_score', 0)
+        vol_price_score = tech_info.get('vol_price_score') or 0
         # 归一化到0-100
         vol_price_normalized = (vol_price_score + 20) / 40 * 100
         vol_price_normalized = min(100, max(0, vol_price_normalized))
@@ -1467,7 +1468,7 @@ class MultiDimensionScorer:
         score += vol_price_normalized * cls.TECH_WEIGHTS['vol_price']
 
         # ========== 量比 (0-100) ==========
-        volume_ratio = tech_info.get('volume_ratio', 1)
+        volume_ratio = tech_info.get('volume_ratio') or 1
         if volume_ratio >= 2.0:
             vol_score = min(100, 70 + (volume_ratio - 2.0) * 15)
         elif volume_ratio >= 1.5:
@@ -1499,7 +1500,7 @@ class MultiDimensionScorer:
         score = 0
 
         # ========== 主力净流入占比 (0-100) ==========
-        main_ratio = fund_info.get('main_ratio', 0)
+        main_ratio = fund_info.get('main_ratio') or 0
         # 动态阈值：熊市对主力占比要求更高
         if market_env == 'BEAR':
             main_ratio_score = min(100, main_ratio * 4)  # 25%以上满分
@@ -1508,7 +1509,7 @@ class MultiDimensionScorer:
         score += main_ratio_score * cls.FUND_WEIGHTS['main_ratio']
 
         # ========== 连续净流入天数 (0-100) - 权重最高 ==========
-        consecutive_days = fund_info.get('consecutive_days', 0)
+        consecutive_days = fund_info.get('consecutive_days') or 0
         # 使用指数增长模型：天数越多加分加速
         if consecutive_days >= 10:
             consecutive_score = 100
@@ -1519,7 +1520,7 @@ class MultiDimensionScorer:
         score += consecutive_score * cls.FUND_WEIGHTS['consecutive_days']
 
         # ========== 超大单净流入 (0-100) ==========
-        super_inflow = fund_info.get('super_inflow', 0)
+        super_inflow = fund_info.get('super_inflow') or 0
         if super_inflow > 100000000:  # 超过1亿
             super_score = 100
         elif super_inflow > 50000000:  # 超过5000万
@@ -1541,7 +1542,7 @@ class MultiDimensionScorer:
 
         # ========== 流入动量 (0-100) - 新增 ==========
         # 近3天vs近5天的流入对比，流入加速加分
-        recent_momentum = fund_info.get('recent_momentum', 0)
+        recent_momentum = fund_info.get('recent_momentum') or 0
         if recent_momentum > 0.2:  # 流入加速超过20%
             momentum_score = min(100, 70 + recent_momentum * 100)
         elif recent_momentum > 0:
@@ -1701,7 +1702,7 @@ class MultiDimensionScorer:
         env = cls.MARKET_ENVIRONMENT.get(market_env, cls.MARKET_ENVIRONMENT['NEUTRAL'])
 
         # ========== 振幅得分 (0-100) ==========
-        amplitude = tech_info.get('amplitude', 10)
+        amplitude = tech_info.get('amplitude') or 10
         amp_min = params.get('amplitude_min', 5)
         amp_max = params.get('amplitude_max', 35)
 
@@ -1719,11 +1720,11 @@ class MultiDimensionScorer:
         score += amp_score * cls.TREND_WEIGHTS['amplitude']
 
         # ========== 年线位置 (0-100) - 权重最高 ==========
-        price = tech_info.get('current_price', 0)
-        ma60 = tech_info.get('ma60', 0)
-        ma20 = tech_info.get('ma20', 0)
-        ma10 = tech_info.get('ma10', 0)
-        ma5 = tech_info.get('ma5', 0)
+        price = tech_info.get('current_price') or 0
+        ma60 = tech_info.get('ma60') or 0
+        ma20 = tech_info.get('ma20') or 0
+        ma10 = tech_info.get('ma10') or 0
+        ma5 = tech_info.get('ma5') or 0
 
         above_year_ma = params.get('above_year_ma', False)
 
@@ -1757,8 +1758,8 @@ class MultiDimensionScorer:
         # ========== 筹码集中 (0-100) ==========
         chip = params.get('chip_concentration', False)
         # 简化处理，根据量价关系推断
-        vol_price_score = tech_info.get('vol_price_score', 0)
-        volume_ratio = tech_info.get('volume_ratio', 1)
+        vol_price_score = tech_info.get('vol_price_score') or 0
+        volume_ratio = tech_info.get('volume_ratio') or 1
 
         if vol_price_score > 10 and volume_ratio > 1.3:
             # 量增价涨，筹码可能正在集中
@@ -1866,8 +1867,8 @@ class MultiDimensionScorer:
         momentum_score = 50
         if tech_info:
             # 近5天量价表现
-            vol_price_score = tech_info.get('vol_price_score', 0)
-            volume_ratio = tech_info.get('volume_ratio', 1)
+            vol_price_score = tech_info.get('vol_price_score') or 0
+            volume_ratio = tech_info.get('volume_ratio') or 1
 
             # 合成动量信号
             if vol_price_score > 15 and volume_ratio > 1.5:
@@ -2302,11 +2303,11 @@ class RiskControlManager:
 
         # 技术面止损
         # 1. 布林带下轨止损
-        boll_lower = tech_info.get('boll_lower', current_price * 0.95)
+        boll_lower = tech_info.get('boll_lower') or current_price * 0.95
 
         # 2. 均线止损
-        ma20 = tech_info.get('ma20', current_price)
-        ma60 = tech_info.get('ma60', current_price * 0.9)
+        ma20 = tech_info.get('ma20') or current_price
+        ma60 = tech_info.get('ma60') or current_price * 0.9
 
         # 3. 前期低点止损
         # 使用近期最低点作为参考
@@ -2360,8 +2361,8 @@ class RiskControlManager:
             }
 
         # 技术面止盈
-        boll_upper = tech_info.get('boll_upper', current_price * 1.10)
-        ma20 = tech_info.get('ma20', current_price * 1.05)
+        boll_upper = tech_info.get('boll_upper') or current_price * 1.10
+        ma20 = tech_info.get('ma20') or current_price * 1.05
 
         # 阻力位计算
         resistance_levels = [
@@ -2404,7 +2405,7 @@ class RiskControlManager:
         # ========== 技术面风险 ==========
         if tech_info:
             # RSI超买风险
-            rsi6 = tech_info.get('rsi6', 50)
+            rsi6 = tech_info.get('rsi6') or 50
             if rsi6 > 85:
                 risk_score -= 15
                 risk_factors.append(f'RSI严重超买({rsi6:.1f})')
@@ -2425,18 +2426,18 @@ class RiskControlManager:
                 risk_warnings.append('⚠️ 均线空头排列，下跌趋势')
 
             # 布林带上轨压力
-            boll_position = tech_info.get('boll_position', 50)
+            boll_position = tech_info.get('boll_position') or 50
             if boll_position > 90:
                 risk_score -= 10
                 risk_factors.append(f'股价触及布林带上轨({boll_position:.1f}%)')
 
             # MACD死叉
-            if tech_info.get('macd_dead_cross_days', 0) <= 3:
+            if (tech_info.get('macd_dead_cross_days') or 0) <= 3:
                 risk_score -= 8
                 risk_factors.append('MACD刚形成死叉')
 
             # 量价背离
-            vol_price_score = tech_info.get('vol_price_score', 0)
+            vol_price_score = tech_info.get('vol_price_score') or 0
             if vol_price_score < -10:
                 risk_score -= 10
                 risk_factors.append('量价背离')
@@ -2489,7 +2490,7 @@ class RiskControlManager:
         # ========== 资金面风险 ==========
         if fund_info:
             # 主力净流出
-            main_inflow = fund_info.get('main_inflow', 0)
+            main_inflow = fund_info.get('main_inflow') or 0
             if main_inflow < 0:
                 risk_score -= 10
                 risk_factors.append('主力资金净流出')
