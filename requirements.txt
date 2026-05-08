@@ -4,8 +4,10 @@ pandas>=2.0.3
 numpy>=1.24.3
 plotly>=5.15.0
 yfinance>=0.2.18
-akshare>=1.11.0
+akshare>=1.12.0
 tushare>=1.3.0
+efinance>=0.5.5
+baostock>=0.8.0
 openai>=1.12.0
 python-dotenv>=1.0.0
 pytz

@@ -692,15 +692,21 @@ class MainForceAnalyzerV2:
 
             response = self.deepseek_client.call_api(messages, max_tokens=4000)
 
+            # 检查API是否返回了有效响应
+            if not response or response.startswith("API") or response.startswith("调用失败"):
+                print(f"  ⚠️ API返回无效响应: {response}")
+                raise ValueError(f"API返回无效响应: {response}")
+
             # 解析JSON响应
             import re
 
-            # 提取JSON部分
-            json_match = re.search(r'```json\s*(\{.*?\})\s*```', response, re.DOTALL)
+            # 提取JSON部分 - 使用更健壮的regex处理嵌套JSON
+            json_match = re.search(r'```json\s*(\{[\s\S]*?\})\s*```', response)
             if json_match:
                 json_str = json_match.group(1)
             else:
-                json_str = response
+                # 尝试直接解析整个响应（可能是无标记的JSON）
+                json_str = response.strip()
 
             result = json.loads(json_str)
             recommendations = result.get('recommendations', [])
